@@ -143,3 +143,9 @@ REST_FRAMEWORK = {
 PAYMENT_WEBHOOK_SECRET = "dev-webhook-secret"   # mock gateway shares this with us
 
 AUTH_USER_MODEL = "accounts.User"
+
+import sys
+
+# Tests only: use a fast (insecure) hasher. Real passwords still use PBKDF2.
+if "test" in sys.argv:
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]

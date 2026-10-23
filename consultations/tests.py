@@ -353,3 +353,104 @@ class SessionFlowTests(APITestCase):
         self.as_(self.user)
         self.assertEqual(self.client.post(f"/api/sessions/{sid}/cancel/").status_code, 400)
 
+
+class InsufficientBalanceTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("riya", password="x")
+        self.provider = User.objects.create_user(
+            "doc", password="x", role=User.Role.PROVIDER, per_minute_rate=Decimal("50"))
+
+    def fund(self, amount):
+        wallet_services.credit(self.user, Decimal(amount), reason="test")
+
+    def started_session(self, clock_start=T0):
+        sid = ConsultationSession.objects.create(
+            user=self.user, provider=self.provider, status=S.ACCEPTED).pk
+        self.call(self.user, sid, "start")
+        return sid
+
+    def call(self, who, sid, action):
+        self.client.force_authenticate(who)
+        return self.client.post(f"/api/sessions/{sid}/{action}/")
+
+    def balance(self):
+        self.user.wallet.refresh_from_db()
+        return self.user.wallet.balance
+
+    def session(self, sid):
+        return ConsultationSession.objects.get(pk=sid)
+
+    # REQUIRED TEST #3: assignment example, ₹40 left, ₹50/min
+    def test_balance_runs_out_session_auto_ends(self):
+        self.fund("290")
+        with freeze_time(T0) as clock:
+            sid = self.started_session()
+            clock.move_to("2026-01-01 10:05:00")
+            r = self.call(self.user, sid, "bill")
+        self.assertEqual(r.data["status"], S.COMPLETED)
+        self.assertEqual(r.data["ended_by"], "system")
+        self.assertEqual(r.data["end_reason"], "insufficient_balance")
+        self.assertEqual(r.data["billed_minutes"], 5)
+        self.assertEqual(r.data["talk_seconds"], 300)
+        self.assertEqual(self.balance(), Decimal("40.00"))     # remains ₹40, never negative
+
+    def test_late_billing_never_goes_negative(self):
+        self.fund("250")
+        with freeze_time(T0) as clock:
+            sid = self.started_session()
+            clock.move_to("2026-01-01 10:07:30")               # 7 minutes owed, only 5 payable
+            self.call(self.user, sid, "bill")
+        s = self.session(sid)
+        self.assertEqual(s.status, S.COMPLETED)
+        self.assertEqual(s.ended_by, "system")
+        self.assertEqual(s.billed_minutes, 5)                  # billable time
+        self.assertEqual(s.talk_seconds, 450)                  # actual talk time
+        self.assertEqual(self.balance(), Decimal("0.00"))
+
+    def test_session_continues_while_next_minute_is_affordable(self):
+        self.fund("300")
+        with freeze_time(T0) as clock:
+            sid = self.started_session()
+            clock.move_to("2026-01-01 10:04:00")
+            self.call(self.user, sid, "bill")
+        self.assertEqual(self.session(sid).status, S.IN_PROGRESS)
+        self.assertEqual(self.balance(), Decimal("100.00"))
+
+    def test_auto_ended_session_cannot_be_ended_or_billed_again(self):
+        self.fund("290")
+        with freeze_time(T0) as clock:
+            sid = self.started_session()
+            clock.move_to("2026-01-01 10:05:00")
+            self.call(self.user, sid, "bill")
+            clock.move_to("2026-01-01 10:09:00")
+            self.assertEqual(self.call(self.user, sid, "end").status_code, 400)
+            self.call(self.user, sid, "bill")
+        self.assertEqual(self.balance(), Decimal("40.00"))     # unchanged
+
+    def test_user_ending_with_low_balance_is_recorded_as_user(self):
+        self.fund("290")
+        with freeze_time(T0) as clock:
+            sid = self.started_session()
+            clock.move_to("2026-01-01 10:05:10")
+            r = self.call(self.user, sid, "end")               # all 5 minutes were payable
+        self.assertEqual(r.data["ended_by"], "user")
+        self.assertEqual(self.balance(), Decimal("40.00"))
+
+    def test_user_ending_with_unpaid_minutes_is_recorded_as_system(self):
+        self.fund("250")
+        with freeze_time(T0) as clock:
+            sid = self.started_session()
+            clock.move_to("2026-01-01 10:07:00")               # minutes 6–7 can't be paid
+            r = self.call(self.user, sid, "end")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["ended_by"], "system")
+        self.assertEqual(r.data["end_reason"], "insufficient_balance")
+        self.assertEqual(self.balance(), Decimal("0.00"))
+
+    def test_cron_command_auto_ends(self):
+        self.fund("250")
+        with freeze_time(T0) as clock:
+            sid = self.started_session()
+            clock.move_to("2026-01-01 10:05:00")
+            call_command("bill_active_sessions")
+        self.assertEqual(self.session(sid).ended_by, "system")

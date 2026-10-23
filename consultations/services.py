@@ -1,19 +1,11 @@
-from django.db import transaction
-from django.utils import timezone
-from accounts.models import User
-from common.exceptions import NotAllowed, NotFound
-from .models import ConsultationSession
-from .state_machine import apply_transition
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from accounts.models import User
 from common.exceptions import ActiveSessionExists, InsufficientBalance, NotAllowed, NotFound
-from wallet.models import Wallet
-from .models import ConsultationSession
-from .state_machine import apply_transition
-from common.exceptions import ActiveSessionExists, InsufficientBalance, NotAllowed, NotFound   # (already there)
 from wallet import services as wallet_services
+from wallet.models import Wallet
 from .models import BillingRecord, ConsultationSession
+from .state_machine import apply_transition
 
 
 S = ConsultationSession.Status
@@ -106,24 +98,40 @@ def start(session_id, actor):
 
 # ---------------- Billing ----------------
 
-def _bill_elapsed_minutes(session, now):
-    """Charge every fully elapsed minute that hasn't been charged yet. Caller must hold the session lock."""
+def _bill_elapsed_minutes(session, now, *, end_if_next_unaffordable=True):
+    """
+    Charge every fully elapsed minute not charged yet (at the rate locked at start).
+    The SYSTEM ends the session if:
+      - a minute can't be paid (wallet would go negative), or
+      - end_if_next_unaffordable and the wallet can't cover the next minute.
+    Caller must hold the session lock.
+    """
+    rate = session.per_minute_rate
     elapsed = int((now - session.started_at).total_seconds() // 60)
+    ran_out = False
 
     for minute in range(session.billed_minutes + 1, elapsed + 1):
         try:
             wallet_services.debit(
-                session.user, session.per_minute_rate,
+                session.user, rate,
                 reason="session_billing", reference=f"session-{session.pk}-minute-{minute}",
             )
         except InsufficientBalance:
-            break          # Step 10: end the session automatically here
+            ran_out = True                      # stop: never go negative
+            break
 
-        BillingRecord.objects.create(session=session, minute_number=minute, amount=session.per_minute_rate)
+        BillingRecord.objects.create(session=session, minute_number=minute, amount=rate)
         session.billed_minutes = minute
-        session.billed_amount += session.per_minute_rate
+        session.billed_amount += rate
 
     session.save(update_fields=["billed_minutes", "billed_amount", "updated_at"])
+
+    balance = Wallet.objects.get(user_id=session.user_id).balance
+    if ran_out or (end_if_next_unaffordable and balance < rate):
+        _finish(session,
+                ConsultationSession.EndedBy.SYSTEM,
+                ConsultationSession.EndReason.INSUFFICIENT_BALANCE,
+                now)
 
 
 @transaction.atomic
@@ -137,12 +145,15 @@ def bill_session(session_id, now=None):
 
 
 def _finish(session, ended_by, end_reason, now):
-    """Close an in-progress session. Reused by user/provider end now and system end in Step 10."""
-    apply_transition(session, "end")
+    """Close an in-progress session (user, provider or system end)."""
+    apply_transition(session, "end")                    # raises InvalidTransition if not in progress
     session.ended_at = now
     session.ended_by = ended_by
     session.end_reason = end_reason
-    session.save(update_fields=["status", "ended_at", "ended_by", "end_reason", "updated_at"])
+    session.talk_seconds = int((now - session.started_at).total_seconds())
+    session.save(update_fields=["status", "ended_at", "ended_by", "end_reason",
+                                "talk_seconds", "updated_at"])
+
 
 
 @transaction.atomic
@@ -157,6 +168,9 @@ def end(session_id, actor):
 
     now = timezone.now()
     if session.status == S.IN_PROGRESS:
-        _bill_elapsed_minutes(session, now)      # charge full minutes up to the end time
-    _finish(session, ended_by, reason, now)      # raises InvalidTransition if not in progress
+        _bill_elapsed_minutes(session, now, end_if_next_unaffordable=False)
+        if session.status == S.COMPLETED:       # minutes couldn't be paid → system already ended it
+            return session
+    _finish(session, ended_by, reason, now)     # raises InvalidTransition if it never started
     return session
+

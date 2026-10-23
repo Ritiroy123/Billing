@@ -53,4 +53,16 @@ class SessionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.
         session = services.end(self.get_object().pk, request.user)
         return Response(SessionSerializer(session).data)
 
+    @action(detail=True, methods=["post"])
+    def bill(self, request, pk=None):
+        session = services.bill_session(self.get_object().pk)
+        return Response(SessionSerializer(session).data)
+
+
+    @action(detail=True, methods=["post"])
+    def bill(self, request, pk=None):
+        session = services.bill_session(self.get_object().pk)
+        return Response(SessionSerializer(session).data)
+
+
 

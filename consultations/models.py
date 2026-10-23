@@ -35,6 +35,7 @@ class ConsultationSession(models.Model):
     ended_at = models.DateTimeField(null=True, blank=True)
     billed_minutes = models.PositiveIntegerField(default=0)
     billed_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    talk_seconds = models.PositiveIntegerField(default=0)   # actual time from start to end
     ended_by = models.CharField(max_length=10, choices=EndedBy.choices, blank=True)
     end_reason = models.CharField(max_length=25, choices=EndReason.choices, blank=True)
 
