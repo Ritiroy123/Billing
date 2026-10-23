@@ -117,14 +117,14 @@ sequenceDiagram
     participant S as bill_session
     participant DB as Database
     C->>S: POST /sessions/{id}/bill/
-    S->>DB: BEGIN; lock session row (SELECT ... FOR UPDATE)
+    S->>DB: BEGIN transaction, lock session row (SELECT FOR UPDATE)
     S->>S: elapsed = floor((now − started_at) / 60s)
-    loop each minute in (billed_minutes, elapsed]
-        S->>DB: lock wallet, debit rate (refused if balance < rate)
-        S->>DB: insert BillingRecord(session, minute) — unique
+    loop each unbilled minute up to elapsed
+        S->>DB: lock wallet, debit rate (refused if balance is less than rate)
+        S->>DB: insert BillingRecord(session, minute), unique per minute
         S->>S: billed_minutes += 1
     end
-    alt a minute couldn't be paid OR balance < rate
+    alt a minute could not be paid, or balance is less than rate
         S->>DB: status=completed, ended_by=system, end_reason=insufficient_balance
     end
     S->>DB: COMMIT
