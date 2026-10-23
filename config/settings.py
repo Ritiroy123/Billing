@@ -135,10 +135,11 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
     ],
+    "EXCEPTION_HANDLER": "common.exceptions.api_exception_handler",
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
 }
-
+PAYMENT_WEBHOOK_SECRET = "dev-webhook-secret"   # mock gateway shares this with us
 
 AUTH_USER_MODEL = "accounts.User"

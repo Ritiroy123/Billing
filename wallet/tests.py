@@ -78,3 +78,69 @@ class WalletServiceTests(TestCase):
         for bad in [Decimal("0"), Decimal("-10"), 50.0]:
             with self.assertRaises(InvalidAmount):
                 services.credit(self.user, bad, reason="recharge")
+
+
+
+from .models import RechargeTransaction   # add to imports at top
+
+
+class RechargeTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("riya", password="x")
+        self.client.force_authenticate(self.user)
+
+    def start_recharge(self, amount="500"):
+        r = self.client.post("/api/wallet/recharge/", {"amount": amount})
+        self.assertEqual(r.status_code, 201)
+        return r.data["reference"]
+
+    def callback(self, reference, status="success", secret="dev-webhook-secret"):
+        return self.client.post(
+            "/api/wallet/recharge/callback/",
+            {"reference": reference, "status": status},
+            HTTP_X_WEBHOOK_SECRET=secret,
+        )
+
+    def balance(self):
+        self.user.wallet.refresh_from_db()
+        return self.user.wallet.balance
+
+    def test_initiate_creates_pending_without_crediting(self):
+        ref = self.start_recharge()
+        self.assertEqual(RechargeTransaction.objects.get(reference=ref).status, "pending")
+        self.assertEqual(self.balance(), Decimal("0.00"))
+
+    def test_success_callback_credits_wallet(self):
+        ref = self.start_recharge()
+        r = self.callback(ref)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["status"], "success")
+        self.assertEqual(self.balance(), Decimal("500.00"))
+
+    def test_duplicate_success_callback_credits_only_once(self):      # REQUIRED TEST #5
+        ref = self.start_recharge()
+        first = self.callback(ref)
+        second = self.callback(ref)
+        self.assertFalse(first.data["already_processed"])
+        self.assertTrue(second.data["already_processed"])
+        self.assertEqual(self.balance(), Decimal("500.00"))           # not 1000
+        self.assertEqual(WalletTransaction.objects.filter(reference=ref).count(), 1)
+
+    def test_failed_callback_does_not_credit_and_is_final(self):
+        ref = self.start_recharge()
+        self.callback(ref, status="failed")
+        self.callback(ref, status="success")                          # late success is ignored
+        self.assertEqual(RechargeTransaction.objects.get(reference=ref).status, "failed")
+        self.assertEqual(self.balance(), Decimal("0.00"))
+
+    def test_callback_with_wrong_secret_is_rejected(self):
+        ref = self.start_recharge()
+        self.assertEqual(self.callback(ref, secret="hacker").status_code, 403)
+        self.assertEqual(self.balance(), Decimal("0.00"))
+
+    def test_unknown_reference_returns_404(self):
+        self.assertEqual(self.callback("RCH-doesnotexist").status_code, 404)
+
+    def test_invalid_amount_returns_400(self):
+        r = self.client.post("/api/wallet/recharge/", {"amount": "0"})
+        self.assertEqual(r.status_code, 400)

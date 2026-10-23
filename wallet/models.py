@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from django.db.models import Q
+import uuid
 
 
 class Wallet(models.Model):
@@ -41,3 +42,34 @@ class WalletTransaction(models.Model):
 
     def __str__(self):
         return f"{self.kind} ₹{self.amount} ({self.reason})"
+
+
+
+    import uuid   # put this at the top of the file
+
+
+def generate_recharge_reference():
+    return f"RCH-{uuid.uuid4().hex}"
+
+
+class RechargeTransaction(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCESS = "success", "Success"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="recharges")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    reference = models.CharField(max_length=64, unique=True, default=generate_recharge_reference, editable=False)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name="recharge_amount_positive"),
+        ]
+
+    def __str__(self):
+        return f"{self.reference} ₹{self.amount} {self.status}"
+
