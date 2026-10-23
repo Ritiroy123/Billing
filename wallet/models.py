@@ -38,6 +38,10 @@ class WalletTransaction(models.Model):
         ordering = ["-created_at"]
         constraints = [
             models.CheckConstraint(condition=Q(amount__gt=0), name="wallet_txn_amount_positive"),
+            # DB-level guard: one credit per recharge reference, one debit per session-minute reference
+            models.UniqueConstraint(
+                fields=["kind", "reference"], condition=~Q(reference=""), name="unique_txn_reference",
+            ),
         ]
 
     def __str__(self):

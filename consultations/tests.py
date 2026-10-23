@@ -1,17 +1,17 @@
+from decimal import Decimal
+from django.core.management import call_command
+from django.db import IntegrityError, transaction
 from django.test import SimpleTestCase
+from freezegun import freeze_time
 from rest_framework.test import APITestCase
 from accounts.models import User
 from common.exceptions import InvalidTransition
-from .models import ConsultationSession
-from .state_machine import apply_transition, TRANSITIONS
-from decimal import Decimal
 from wallet import services as wallet_services
-from django.core.management import call_command
-from django.db import IntegrityError, transaction
-from freezegun import freeze_time
 from wallet.models import WalletTransaction
-from .models import BillingRecord
+from .models import BillingRecord, ConsultationSession
+from .state_machine import apply_transition, TRANSITIONS
 
+S = ConsultationSession.Status
 T0 = "2026-01-01 10:00:00"
 
 
@@ -255,9 +255,6 @@ class StartEndTests(APITestCase):
         r = self.end(sid, self.provider)
         self.assertEqual(r.data["ended_by"], "provider")
         self.assertEqual(r.data["end_reason"], "provider_ended")
-
-
-S = ConsultationSession.Status
 
 
 class StateMachineUnitTests(SimpleTestCase):

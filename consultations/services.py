@@ -89,7 +89,7 @@ def start(session_id, actor):
     session.per_minute_rate = rate                           # 🔒 rate fixed from now on
     session.started_at = timezone.now()
     try:
-        with transaction.atomic():                           # savepoint (explained below)
+        with transaction.atomic():                           # savepoint so IntegrityError can be caught
             session.save(update_fields=["status", "per_minute_rate", "started_at", "updated_at"])
     except IntegrityError:
         # The DB's one-active-session rule caught a race the check above missed

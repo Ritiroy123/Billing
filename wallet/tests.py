@@ -1,8 +1,11 @@
 from decimal import Decimal
 from django.db import IntegrityError, transaction
+from django.test import TestCase
 from rest_framework.test import APITestCase
 from accounts.models import User
-from .models import Wallet
+from common.exceptions import InsufficientBalance, InvalidAmount
+from . import services
+from .models import RechargeTransaction, Wallet, WalletTransaction
 
 
 class WalletTests(APITestCase):
@@ -33,13 +36,6 @@ class WalletTests(APITestCase):
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 wallet.save()
-
-
-
-from django.test import TestCase
-from common.exceptions import InsufficientBalance, InvalidAmount
-from . import services
-from .models import WalletTransaction
 
 
 class WalletServiceTests(TestCase):
@@ -79,9 +75,13 @@ class WalletServiceTests(TestCase):
             with self.assertRaises(InvalidAmount):
                 services.credit(self.user, bad, reason="recharge")
 
-
-
-from .models import RechargeTransaction   # add to imports at top
+    def test_db_rejects_second_credit_with_same_reference(self):
+        services.credit(self.user, Decimal("500"), reason="recharge", reference="RCH-1")
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                services.credit(self.user, Decimal("500"), reason="recharge", reference="RCH-1")
+        self.user.wallet.refresh_from_db()
+        self.assertEqual(self.user.wallet.balance, Decimal("500.00"))
 
 
 class RechargeTests(APITestCase):
