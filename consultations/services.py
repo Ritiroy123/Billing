@@ -11,6 +11,10 @@ from common.exceptions import ActiveSessionExists, InsufficientBalance, NotAllow
 from wallet.models import Wallet
 from .models import ConsultationSession
 from .state_machine import apply_transition
+from common.exceptions import ActiveSessionExists, InsufficientBalance, NotAllowed, NotFound   # (already there)
+from wallet import services as wallet_services
+from .models import BillingRecord, ConsultationSession
+
 
 S = ConsultationSession.Status
 MIN_BALANCE_MINUTES = 5
@@ -100,11 +104,42 @@ def start(session_id, actor):
         raise ActiveSessionExists("You already have a session in progress. End it first.")
     return session
 
+# ---------------- Billing ----------------
 
-def _finish(session, ended_by, end_reason):
+def _bill_elapsed_minutes(session, now):
+    """Charge every fully elapsed minute that hasn't been charged yet. Caller must hold the session lock."""
+    elapsed = int((now - session.started_at).total_seconds() // 60)
+
+    for minute in range(session.billed_minutes + 1, elapsed + 1):
+        try:
+            wallet_services.debit(
+                session.user, session.per_minute_rate,
+                reason="session_billing", reference=f"session-{session.pk}-minute-{minute}",
+            )
+        except InsufficientBalance:
+            break          # Step 10: end the session automatically here
+
+        BillingRecord.objects.create(session=session, minute_number=minute, amount=session.per_minute_rate)
+        session.billed_minutes = minute
+        session.billed_amount += session.per_minute_rate
+
+    session.save(update_fields=["billed_minutes", "billed_amount", "updated_at"])
+
+
+@transaction.atomic
+def bill_session(session_id, now=None):
+    """Safe to call any number of times: only not-yet-charged full minutes are billed."""
+    session = _get_locked(session_id)
+    if session.status != S.IN_PROGRESS:
+        return session                       # nothing to bill → harmless no-op
+    _bill_elapsed_minutes(session, now or timezone.now())
+    return session
+
+
+def _finish(session, ended_by, end_reason, now):
     """Close an in-progress session. Reused by user/provider end now and system end in Step 10."""
     apply_transition(session, "end")
-    session.ended_at = timezone.now()
+    session.ended_at = now
     session.ended_by = ended_by
     session.end_reason = end_reason
     session.save(update_fields=["status", "ended_at", "ended_by", "end_reason", "updated_at"])
@@ -120,6 +155,8 @@ def end(session_id, actor):
     else:
         raise NotAllowed("Only participants can end this session.")
 
-    # Step 9 will add: bill any remaining full minutes here, before closing.
-    _finish(session, ended_by, reason)
+    now = timezone.now()
+    if session.status == S.IN_PROGRESS:
+        _bill_elapsed_minutes(session, now)      # charge full minutes up to the end time
+    _finish(session, ended_by, reason, now)      # raises InvalidTransition if not in progress
     return session

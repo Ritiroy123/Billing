@@ -52,3 +52,20 @@ class ConsultationSession(models.Model):
 
     def __str__(self):
         return f"Session {self.pk} ({self.status})"
+
+
+
+class BillingRecord(models.Model):
+    session = models.ForeignKey(ConsultationSession, on_delete=models.PROTECT, related_name="billing_records")
+    minute_number = models.PositiveIntegerField()
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["minute_number"]
+        constraints = [
+            models.UniqueConstraint(fields=["session", "minute_number"], name="one_charge_per_minute"),
+        ]
+
+    def __str__(self):
+        return f"Session {self.session_id} minute {self.minute_number}: ₹{self.amount}"

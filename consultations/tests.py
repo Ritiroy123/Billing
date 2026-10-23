@@ -6,6 +6,149 @@ from .models import ConsultationSession
 from .state_machine import apply_transition, TRANSITIONS
 from decimal import Decimal
 from wallet import services as wallet_services
+from django.core.management import call_command
+from django.db import IntegrityError, transaction
+from freezegun import freeze_time
+from wallet.models import WalletTransaction
+from .models import BillingRecord
+
+T0 = "2026-01-01 10:00:00"
+
+
+class BillingTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("riya", password="x")
+        self.provider = User.objects.create_user(
+            "doc", password="x", role=User.Role.PROVIDER, per_minute_rate=Decimal("50"))
+
+    # helpers
+    def fund(self, amount):
+        wallet_services.credit(self.user, Decimal(amount), reason="test")
+
+    def accepted_session(self):
+        return ConsultationSession.objects.create(
+            user=self.user, provider=self.provider, status=S.ACCEPTED).pk
+
+    def call(self, who, sid, action):
+        self.client.force_authenticate(who)
+        return self.client.post(f"/api/sessions/{sid}/{action}/")
+
+    def balance(self):
+        self.user.wallet.refresh_from_db()
+        return self.user.wallet.balance
+
+    def session(self, sid):
+        return ConsultationSession.objects.get(pk=sid)
+
+    # REQUIRED TEST #2: full happy path through the API
+    def test_happy_path(self):
+        self.client.force_authenticate(self.user)
+        ref = self.client.post("/api/wallet/recharge/", {"amount": "500"}).data["reference"]
+        self.client.post("/api/wallet/recharge/callback/", {"reference": ref, "status": "success"},
+                         HTTP_X_WEBHOOK_SECRET="dev-webhook-secret")
+        self.assertEqual(self.balance(), Decimal("500.00"))
+
+        sid = self.client.post("/api/sessions/").data["id"]
+        self.client.post(f"/api/sessions/{sid}/assign/", {"provider_id": self.provider.id})
+        self.call(self.provider, sid, "accept")
+
+        with freeze_time(T0) as clock:
+            self.call(self.user, sid, "start")
+            clock.move_to("2026-01-01 10:02:00")             # 2 minutes later
+            r = self.call(self.user, sid, "bill")
+            self.assertEqual(r.data["billed_minutes"], 2)
+            clock.move_to("2026-01-01 10:02:30")             # half a minute more
+            r = self.call(self.user, sid, "end")
+
+        self.assertEqual(r.data["status"], S.COMPLETED)
+        self.assertEqual(r.data["billed_minutes"], 2)          # partial minute not charged
+        self.assertEqual(r.data["billed_amount"], "100.00")
+        self.assertEqual(self.balance(), Decimal("400.00"))    # 500 − 2 × 50
+        self.assertEqual(BillingRecord.objects.filter(session_id=sid).count(), 2)
+
+    # REQUIRED TEST #6
+    def test_duplicate_billing_does_not_charge_twice(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        with freeze_time(T0) as clock:
+            self.call(self.user, sid, "start")
+            clock.move_to("2026-01-01 10:02:00")
+            self.call(self.user, sid, "bill")
+            self.call(self.user, sid, "bill")                  # same minute, again
+            clock.move_to("2026-01-01 10:02:45")
+            self.call(self.provider, sid, "bill")              # still minute 2, other participant
+        self.assertEqual(self.session(sid).billed_minutes, 2)
+        self.assertEqual(self.balance(), Decimal("400.00"))
+        self.assertEqual(WalletTransaction.objects.filter(reason="session_billing").count(), 2)
+
+    def test_no_charge_before_first_full_minute(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        with freeze_time(T0) as clock:
+            self.call(self.user, sid, "start")
+            clock.move_to("2026-01-01 10:00:59")
+            self.call(self.user, sid, "bill")
+        self.assertEqual(self.balance(), Decimal("500.00"))
+
+    def test_billing_catches_up_missed_minutes(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        with freeze_time(T0) as clock:
+            self.call(self.user, sid, "start")
+            clock.move_to("2026-01-01 10:05:10")               # no billing for 5 minutes
+            self.call(self.user, sid, "bill")
+        self.assertEqual(self.session(sid).billed_minutes, 5)
+        self.assertEqual(self.balance(), Decimal("250.00"))
+
+    def test_end_bills_remaining_minutes(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        with freeze_time(T0) as clock:
+            self.call(self.user, sid, "start")
+            clock.move_to("2026-01-01 10:03:10")
+            self.call(self.user, sid, "end")                   # never called bill
+        self.assertEqual(self.session(sid).billed_minutes, 3)
+        self.assertEqual(self.balance(), Decimal("350.00"))
+
+    def test_billing_uses_rate_locked_at_start(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        with freeze_time(T0) as clock:
+            self.call(self.user, sid, "start")
+            self.provider.per_minute_rate = Decimal("80")
+            self.provider.save()
+            clock.move_to("2026-01-01 10:01:00")
+            self.call(self.user, sid, "bill")
+        self.assertEqual(self.balance(), Decimal("450.00"))    # charged 50, not 80
+
+    def test_billing_a_completed_session_is_a_no_op(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        with freeze_time(T0) as clock:
+            self.call(self.user, sid, "start")
+            clock.move_to("2026-01-01 10:01:00")
+            self.call(self.user, sid, "end")
+            clock.move_to("2026-01-01 10:10:00")
+            r = self.call(self.user, sid, "bill")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.balance(), Decimal("450.00"))    # only the 1 minute before end
+
+    def test_db_rejects_same_minute_twice(self):
+        sid = self.accepted_session()
+        BillingRecord.objects.create(session_id=sid, minute_number=1, amount=Decimal("50"))
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                BillingRecord.objects.create(session_id=sid, minute_number=1, amount=Decimal("50"))
+
+    def test_management_command_bills_active_sessions(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        with freeze_time(T0) as clock:
+            self.call(self.user, sid, "start")
+            clock.move_to("2026-01-01 10:02:00")
+            call_command("bill_active_sessions")
+            call_command("bill_active_sessions")               # running twice is harmless
+        self.assertEqual(self.balance(), Decimal("400.00"))
 
 
 class StartEndTests(APITestCase):
