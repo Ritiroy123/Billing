@@ -14,9 +14,13 @@ import os
 from pathlib import Path
 
 import dj_database_url
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Local secrets (DATABASE_URL etc.) live in .env, which is git-ignored. See .env.example.
+load_dotenv(BASE_DIR / ".env")
 
 
 # Development defaults; override with environment variables in production.
@@ -78,7 +82,7 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-# SQLite by default; set DATABASE_URL=postgres://user:pass@localhost:5432/billing for PostgreSQL.
+# PostgreSQL via DATABASE_URL (set in .env); falls back to SQLite if it isn't set.
 DATABASES = {
     "default": dj_database_url.config(default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}"),
 }

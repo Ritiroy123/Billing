@@ -28,6 +28,10 @@ These are the decisions that matter most for correctness, with the alternatives 
 - I chose this over optimistic locking (a version column with retries) because it is simpler and
   always correct, and contention on a single wallet or session is low. On PostgreSQL these are
   real row locks. SQLite ignores `select_for_update` but serialises writers.
+- **Proven, not just claimed.** `consultations/test_concurrency.py` releases 5–10 threads at
+  the same moment against one wallet, session or recharge on PostgreSQL. Removing the locks makes
+  these tests fail (lost updates on debits, crashes on duplicate webhooks), so they really
+  exercise the locking. CI runs them on every push.
 
 ## 4. Session state machine
 
