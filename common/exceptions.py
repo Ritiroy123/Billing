@@ -29,3 +29,14 @@ def api_exception_handler(exc, context):
     if isinstance(exc, DomainError):
         return Response({"error": exc.code, "detail": exc.message}, status=exc.status_code)
     return drf_exception_handler(exc, context)   # everything else: DRF's normal handling
+
+
+
+class InvalidTransition(DomainError):
+    code = "invalid_transition"
+
+
+class NotAllowed(DomainError):
+    code = "not_allowed"
+    status_code = 403
+
