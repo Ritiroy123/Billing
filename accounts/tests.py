@@ -18,3 +18,10 @@ class AuthTests(APITestCase):
 
     def test_me_requires_token(self):
         self.assertEqual(self.client.get("/api/auth/me/").status_code, 401)
+
+    def test_provider_registration_requires_rate(self):
+        r = self.client.post("/api/auth/register/",
+                             {"username": "doc", "password": "Str0ngPass!", "role": "PROVIDER"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("per_minute_rate", r.data)
+    

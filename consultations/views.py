@@ -16,7 +16,7 @@ class SessionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.
         return ConsultationSession.objects.filter(Q(user=me) | Q(provider=me))
 
     def get_permissions(self):
-        if self.action in ("create", "assign"):
+        if self.action in ("create", "assign", "start"):
             return [IsUserRole()]
         if self.action == "accept":
             return [IsProviderRole()]
@@ -42,3 +42,15 @@ class SessionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.
     def cancel(self, request, pk=None):
         session = services.cancel(self.get_object().pk, request.user)
         return Response(SessionSerializer(session).data)
+
+    @action(detail=True, methods=["post"])
+    def start(self, request, pk=None):
+        session = services.start(self.get_object().pk, request.user)
+        return Response(SessionSerializer(session).data)
+
+    @action(detail=True, methods=["post"])
+    def end(self, request, pk=None):
+        session = services.end(self.get_object().pk, request.user)
+        return Response(SessionSerializer(session).data)
+
+

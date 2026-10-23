@@ -4,6 +4,115 @@ from accounts.models import User
 from common.exceptions import InvalidTransition
 from .models import ConsultationSession
 from .state_machine import apply_transition, TRANSITIONS
+from decimal import Decimal
+from wallet import services as wallet_services
+
+
+class StartEndTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("riya", password="x")
+        self.provider = User.objects.create_user(
+            "doc", password="x", role=User.Role.PROVIDER, per_minute_rate=Decimal("50"))
+
+    # helpers
+    def as_(self, who):
+        self.client.force_authenticate(who)
+
+    def fund(self, amount):
+        wallet_services.credit(self.user, Decimal(amount), reason="test")
+
+    def accepted_session(self, provider=None):
+        provider = provider or self.provider
+        s = ConsultationSession.objects.create(user=self.user, provider=provider, status=S.ACCEPTED)
+        return s.pk
+
+    def start(self, sid):
+        self.as_(self.user)
+        return self.client.post(f"/api/sessions/{sid}/start/")
+
+    def end(self, sid, who):
+        self.as_(who)
+        return self.client.post(f"/api/sessions/{sid}/end/")
+
+    def balance(self):
+        self.user.wallet.refresh_from_db()
+        return self.user.wallet.balance
+
+    # REQUIRED TEST #1
+    def test_cannot_start_with_less_than_5_minutes_balance(self):
+        self.fund("249")                                   # needs 5 × 50 = 250
+        sid = self.accepted_session()
+        r = self.start(sid)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["error"], "insufficient_balance")
+        session = ConsultationSession.objects.get(pk=sid)
+        self.assertEqual(session.status, S.ACCEPTED)       # did not start
+        self.assertIsNone(session.started_at)
+        self.assertEqual(self.balance(), Decimal("249.00"))  # nothing charged
+
+    def test_can_start_with_exactly_5_minutes_balance(self):
+        self.fund("250")
+        r = self.start(self.accepted_session())
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["status"], S.IN_PROGRESS)
+        self.assertEqual(r.data["per_minute_rate"], "50.00")
+        self.assertIsNotNone(r.data["started_at"])
+        self.assertEqual(self.balance(), Decimal("250.00"))  # start only checks, no charge
+
+    # REQUIRED TEST #4
+    def test_end_before_start_returns_400(self):
+        sid = self.accepted_session()
+        r = self.end(sid, self.user)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["error"], "invalid_transition")
+
+    def test_cannot_start_twice(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        self.start(sid)
+        self.assertEqual(self.start(sid).status_code, 400)
+
+    def test_cannot_have_two_sessions_in_progress(self):
+        self.fund("1000")
+        doc2 = User.objects.create_user("doc2", password="x", role=User.Role.PROVIDER,
+                                        per_minute_rate=Decimal("50"))
+        first, second = self.accepted_session(), self.accepted_session(doc2)
+        self.assertEqual(self.start(first).status_code, 200)
+        r = self.start(second)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["error"], "active_session_exists")
+
+    def test_rate_is_locked_at_start(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        self.start(sid)
+        self.provider.per_minute_rate = Decimal("80")       # provider raises price mid-call
+        self.provider.save()
+        self.assertEqual(ConsultationSession.objects.get(pk=sid).per_minute_rate, Decimal("50.00"))
+
+    def test_provider_cannot_start(self):
+        sid = self.accepted_session()
+        self.as_(self.provider)
+        self.assertEqual(self.client.post(f"/api/sessions/{sid}/start/").status_code, 403)
+
+    def test_user_ends_session(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        self.start(sid)
+        r = self.end(sid, self.user)
+        self.assertEqual(r.data["status"], S.COMPLETED)
+        self.assertEqual(r.data["ended_by"], "user")
+        self.assertEqual(r.data["end_reason"], "user_ended")
+        self.assertIsNotNone(r.data["ended_at"])
+
+    def test_provider_ends_session(self):
+        self.fund("500")
+        sid = self.accepted_session()
+        self.start(sid)
+        r = self.end(sid, self.provider)
+        self.assertEqual(r.data["ended_by"], "provider")
+        self.assertEqual(r.data["end_reason"], "provider_ended")
+
 
 S = ConsultationSession.Status
 
@@ -56,7 +165,7 @@ class SessionFlowTests(APITestCase):
         self.assertEqual(self.assign(sid, self.provider).data["status"], S.ASSIGNED)
         self.assertEqual(self.accept(sid, self.provider).data["status"], S.ACCEPTED)
 
-    def test_accept_before_assign_returns_400(self):
+    def test_accept_twice_returns_400(self):
         sid = self.create_session()
         self.as_(self.user)
         # provider isn't a participant yet → use a session that is assigned to doc, then try a skip:

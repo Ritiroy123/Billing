@@ -40,3 +40,7 @@ class NotAllowed(DomainError):
     code = "not_allowed"
     status_code = 403
 
+
+class ActiveSessionExists(DomainError):
+    code = "active_session_exists"
+
